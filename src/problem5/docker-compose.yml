@@ -1,0 +1,51 @@
+# Local stack: PostgreSQL + one-shot migration + API.
+#   docker compose up --build          # everything, API on http://localhost:3000
+#   docker compose up -d postgres      # only the database, for `npm run dev`
+name: tasks-api
+
+x-database-url: &database-url postgres://tasks:tasks@postgres:5432/tasks
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: tasks
+      POSTGRES_PASSWORD: tasks
+      POSTGRES_DB: tasks
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tasks -d tasks"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  # Applies drizzle/ migrations once, then exits. The API starts only if this succeeds.
+  migrate:
+    build: .
+    image: tasks-api:local
+    command: ["node", "dist/db/migrate.js"]
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: tasks-api:local
+    ports:
+      - "${API_PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: *database-url
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      API_KEY: ${API_KEY:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  pgdata:
