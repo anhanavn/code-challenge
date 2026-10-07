@@ -1,0 +1,19 @@
+{
+  "name": "problem6-scoreboard-spec",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "npm run lint:openapi && npm run lint:md && npm run check:diagrams",
+    "lint:openapi": "redocly lint api/openapi.yaml",
+    "lint:md": "markdownlint-cli2 \"**/*.md\"",
+    "check:diagrams": "node scripts/check-diagrams.mjs",
+    "docs:build": "redocly build-docs api/openapi.yaml -o dist/api.html"
+  },
+  "description": "Scoreboard module specification and API contract (99Tech code challenge, problem 6)",
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "^12.0.0",
+    "@redocly/cli": "^2.59.0",
+    "markdownlint-cli2": "^0.23.3"
+  },
+  "private": true,
+  "type": "module"
+}

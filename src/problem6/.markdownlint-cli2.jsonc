@@ -1,0 +1,16 @@
+{
+  "config": {
+    "default": true,
+    // Long lines are normal in prose and tables.
+    "MD013": false,
+    // Repeated sub-headings such as "Context" are fine under different parents.
+    "MD024": { "siblings_only": true },
+    // Allow the bold "Audience/Status" lines at the top of documents.
+    "MD036": false,
+    // Collapsible <details> sections keep the overview short.
+    "MD033": { "allowed_elements": ["details", "summary"] },
+    // Table separator rows are written compactly (|---|); alignment padding adds noise to diffs.
+    "MD060": false
+  },
+  "ignores": ["node_modules/**", "dist/**"]
+}

@@ -1,0 +1,61 @@
+# Written with this folder (src/problem6) as the repository root.
+name: CI · Scoreboard spec
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Contract, diagrams & Markdown
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: OpenAPI contract (strict lint, examples validated against schemas)
+        run: npm run lint:openapi
+
+      - name: Mermaid diagrams render
+        run: npm run check:diagrams
+
+      - name: Markdown style
+        run: npm run lint:md
+
+      - name: Build API reference
+        run: npm run docs:build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: api-reference
+          path: dist/api.html
+          retention-days: 14
+
+  links:
+    name: Links and anchors
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Offline: checks every relative link and #anchor between the spec, ADRs and contract.
+      - uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --include-fragments --no-progress './**/*.md'
+          fail: true

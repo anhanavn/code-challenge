@@ -1,0 +1,534 @@
+openapi: 3.1.0
+info:
+  title: Scoreboard API
+  version: 1.0.0
+  summary: Server-authoritative score updates and a live top-10 leaderboard.
+  description: |
+    Contract for the scoreboard module of the API service. The design and the reasoning
+    behind it are in the module specification (README.md next to this folder).
+
+    Key rules:
+    - Clients never send points or scores. The server decides whether an action earns points
+      and how many, from its own configuration.
+    - `POST /v1/actions/{actionId}/complete` is idempotent: repeating it returns the original
+      result and never awards points twice.
+    - Errors use RFC 9457 problem details with a stable machine-readable `code`.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /
+    description: Same origin as the API service
+tags:
+  - name: Actions
+    description: Start and complete actions. Completing a valid action awards points.
+  - name: Leaderboard
+    description: Read the top 10, once or as a live stream.
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/actions:
+    post:
+      operationId: startAction
+      tags: [Actions]
+      summary: Start an action
+      description: |
+        Opens a single-use action session bound to the authenticated user. The returned
+        `actionId` is the only thing needed to complete the action later.
+        A user can have at most 3 open sessions (configurable).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartActionRequest'
+            example:
+              type: quiz_round
+      responses:
+        '201':
+          description: Action session created
+          headers:
+            Location:
+              description: URL of the completion endpoint for this action
+              schema:
+                type: string
+              example: /v1/actions/7f9c2b1e-4d3a-4e5f-9b8a-1c2d3e4f5a6b/complete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionSession'
+              example:
+                actionId: 7f9c2b1e-4d3a-4e5f-9b8a-1c2d3e4f5a6b
+                type: quiz_round
+                startedAt: '2026-10-07T09:14:40.112Z'
+                expiresAt: '2026-10-07T09:24:40.112Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/TemporarilyBlocked'
+        '422':
+          description: Unknown or disabled action type
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: about:blank
+                title: Unprocessable Content
+                status: 422
+                code: action_type_unknown
+                detail: Action type "speedrun" does not exist or is disabled
+                instance: /v1/actions
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/actions/{actionId}/complete:
+    post:
+      operationId: completeAction
+      tags: [Actions]
+      summary: Complete an action
+      description: |
+        Marks the action as completed and awards the points configured for its type, in a
+        single database transaction.
+
+        Idempotent: if this user already completed the action, the stored original response is
+        returned with `Idempotent-Replayed: true`, and no further points are awarded. This makes
+        retries after a timeout safe, and makes replay attacks worthless.
+
+        Rejections:
+        - completed faster than the action type's minimum duration → 422 `completion_too_fast`
+          (the session becomes `rejected`)
+        - over the hourly or daily points cap → 429 `score_cap_exceeded` (the session becomes `rejected`)
+        - another user's action → 404, the same as a missing one, so ids can't be probed
+      parameters:
+        - $ref: '#/components/parameters/ActionId'
+      responses:
+        '200':
+          description: Points awarded, or the original result replayed
+          headers:
+            Idempotent-Replayed:
+              description: Present and `true` when this response is a replay of an earlier completion
+              schema:
+                type: string
+                enum: ['true']
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CompletionResult'
+              example:
+                actionId: 7f9c2b1e-4d3a-4e5f-9b8a-1c2d3e4f5a6b
+                pointsAwarded: 10
+                totalScore: 1240
+                completedAt: '2026-10-07T09:15:02.481Z'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/TemporarilyBlocked'
+        '404':
+          description: No such action for this user
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: about:blank
+                title: Not Found
+                status: 404
+                code: action_not_found
+                detail: Action 7f9c2b1e-4d3a-4e5f-9b8a-1c2d3e4f5a6b was not found
+                instance: /v1/actions/7f9c2b1e-4d3a-4e5f-9b8a-1c2d3e4f5a6b/complete
+        '409':
+          description: The action can no longer be completed (expired, or rejected earlier)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: about:blank
+                title: Conflict
+                status: 409
+                code: action_expired
+                detail: Action expired at 2026-10-07T09:24:40.112Z
+                instance: /v1/actions/7f9c2b1e-4d3a-4e5f-9b8a-1c2d3e4f5a6b/complete
+        '422':
+          description: Completed faster than the minimum duration for this action type
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: about:blank
+                title: Unprocessable Content
+                status: 422
+                code: completion_too_fast
+                detail: Action completed in 3.2 s; the minimum for quiz_round is 20 s
+                instance: /v1/actions/7f9c2b1e-4d3a-4e5f-9b8a-1c2d3e4f5a6b/complete
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/leaderboard:
+    get:
+      operationId: getLeaderboard
+      tags: [Leaderboard]
+      summary: Get the current top 10
+      description: |
+        Returns the latest published snapshot. Served from memory on every API instance;
+        safe to cache for one second (also at a CDN). `ETag` is the snapshot version.
+      security: []
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          description: ETag from a previous response; returns 304 if the board hasn't changed
+          schema:
+            type: string
+          example: '"4182"'
+      responses:
+        '200':
+          description: Current top-10 snapshot
+          headers:
+            ETag:
+              description: Snapshot version, quoted
+              schema:
+                type: string
+              example: '"4182"'
+            Cache-Control:
+              description: Short shared caching is allowed
+              schema:
+                type: string
+              example: public, max-age=1
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaderboardSnapshot'
+              example:
+                version: 4182
+                generatedAt: '2026-10-07T09:15:02.733Z'
+                entries:
+                  - rank: 1
+                    userId: 0b6f3a52-6c5e-4c1e-9a43-3c1f0f6f9b2e
+                    displayName: Linh
+                    score: 98210
+                  - rank: 2
+                    userId: 5d2c8e41-1f6b-4a3e-8d7c-2b9a0e1f4c6d
+                    displayName: Minh
+                    score: 97450
+        '304':
+          description: The board hasn't changed since the given ETag
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /v1/leaderboard/stream:
+    get:
+      operationId: streamLeaderboard
+      tags: [Leaderboard]
+      summary: Stream live top-10 snapshots (Server-Sent Events)
+      description: |
+        Server-Sent Events stream. Each `snapshot` event carries a full
+        `LeaderboardSnapshot` as JSON in `data`, and its `version` as the event `id`.
+
+        - The current snapshot is sent immediately on connect (skipped on reconnect if
+          `Last-Event-ID` is already the latest version).
+        - Updates are coalesced: at most one event every 500 ms per connection, always the
+          latest state. Clients should replace their board with each snapshot, not merge.
+        - A heartbeat comment line is sent every 15 s.
+        - The `retry` field is randomized between 1 and 5 s, to spread reconnections out.
+        - At most 5 concurrent streams per IP.
+      security: []
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Sent automatically by EventSource on reconnect; the last snapshot version received
+          schema:
+            type: string
+          example: '4182'
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE frames whose `data` is a LeaderboardSnapshot (see components/schemas/LeaderboardSnapshot)
+              example: |
+                retry: 3217
+
+                id: 4182
+                event: snapshot
+                data: {"version":4182,"generatedAt":"2026-10-07T09:15:02.733Z","entries":[{"rank":1,"userId":"0b6f3a52-6c5e-4c1e-9a43-3c1f0f6f9b2e","displayName":"Linh","score":98210}]}
+
+                : heartbeat
+        '429':
+          description: Too many concurrent streams from this IP, or the instance is at capacity
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: about:blank
+                title: Too Many Requests
+                status: 429
+                code: too_many_connections
+                detail: At most 5 concurrent leaderboard streams per IP
+                instance: /v1/leaderboard/stream
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Existing short-lived access token of the API service; the user id is the `sub` claim
+
+  parameters:
+    ActionId:
+      name: actionId
+      in: path
+      required: true
+      description: Id returned by startAction
+      schema:
+        type: string
+        format: uuid
+      example: 7f9c2b1e-4d3a-4e5f-9b8a-1c2d3e4f5a6b
+
+  headers:
+    Retry-After:
+      description: Seconds to wait before retrying
+      schema:
+        type: integer
+        minimum: 1
+      example: 30
+
+  schemas:
+    StartActionRequest:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          description: Action type key, configured on the server
+          pattern: '^[a-z][a-z0-9_]{0,63}$'
+          examples: [quiz_round]
+
+    ActionSession:
+      type: object
+      required: [actionId, type, startedAt, expiresAt]
+      properties:
+        actionId:
+          type: string
+          format: uuid
+        type:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          description: The action must be completed before this time
+
+    CompletionResult:
+      type: object
+      required: [actionId, pointsAwarded, totalScore, completedAt]
+      properties:
+        actionId:
+          type: string
+          format: uuid
+        pointsAwarded:
+          type: integer
+          minimum: 0
+          description: Points granted by the server for this action type
+        totalScore:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The user's total score right after this completion
+        completedAt:
+          type: string
+          format: date-time
+
+    LeaderboardSnapshot:
+      type: object
+      required: [version, generatedAt, entries]
+      properties:
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Increases with every published change; ignore snapshots older than the one you have
+        generatedAt:
+          type: string
+          format: date-time
+        entries:
+          type: array
+          maxItems: 10
+          description: Ordered by score descending; ties go to whoever reached the score first
+          items:
+            $ref: '#/components/schemas/LeaderboardEntry'
+
+    LeaderboardEntry:
+      type: object
+      required: [rank, userId, displayName, score]
+      properties:
+        rank:
+          type: integer
+          minimum: 1
+          maximum: 10
+        userId:
+          type: string
+          format: uuid
+        displayName:
+          type: string
+          maxLength: 64
+        score:
+          type: integer
+          format: int64
+          minimum: 0
+
+    Problem:
+      type: object
+      description: RFC 9457 problem details
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          examples: [about:blank]
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          type: string
+          description: Stable machine-readable reason; clients should branch on this, not on `detail`
+          enum:
+            - invalid_request
+            - unauthenticated
+            - temporarily_blocked
+            - action_type_unknown
+            - too_many_open_actions
+            - rate_limited
+            - action_not_found
+            - action_expired
+            - action_rejected
+            - completion_too_fast
+            - score_cap_exceeded
+            - too_many_connections
+            - service_unavailable
+        detail:
+          type: string
+        instance:
+          type: string
+        errors:
+          type: array
+          description: Field-level validation errors (invalid_request only)
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+  responses:
+    BadRequest:
+      description: Invalid request body; unknown fields such as `points` or `score` are rejected
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: Bad Request
+            status: 400
+            code: invalid_request
+            detail: The request contains invalid fields
+            instance: /v1/actions
+            errors:
+              - field: points
+                message: Unrecognized field
+    Unauthorized:
+      description: Missing or invalid access token
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: Unauthorized
+            status: 401
+            code: unauthenticated
+            detail: A valid access token is required
+            instance: /v1/actions
+    TemporarilyBlocked:
+      description: The user is temporarily blocked after repeated limit violations, or suspended pending review
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: Forbidden
+            status: 403
+            code: temporarily_blocked
+            detail: Too many rejected requests; try again later
+            instance: /v1/actions
+    TooManyRequests:
+      description: A rate limit, the open-session limit or a points cap was hit
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            rateLimited:
+              summary: Request rate limit
+              value:
+                type: about:blank
+                title: Too Many Requests
+                status: 429
+                code: rate_limited
+                detail: At most 30 completions per minute
+                instance: /v1/actions/7f9c2b1e-4d3a-4e5f-9b8a-1c2d3e4f5a6b/complete
+            scoreCapExceeded:
+              summary: Points cap
+              value:
+                type: about:blank
+                title: Too Many Requests
+                status: 429
+                code: score_cap_exceeded
+                detail: Hourly points cap of 600 reached
+                instance: /v1/actions/7f9c2b1e-4d3a-4e5f-9b8a-1c2d3e4f5a6b/complete
+    ServiceUnavailable:
+      description: PostgreSQL is unavailable, the request deadline passed, or the instance is shedding load. Nothing was changed; safe to retry with backoff because completion is idempotent.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: Service Unavailable
+            status: 503
+            code: service_unavailable
+            detail: Scoring is temporarily unavailable; no points were lost
+            instance: /v1/actions/7f9c2b1e-4d3a-4e5f-9b8a-1c2d3e4f5a6b/complete

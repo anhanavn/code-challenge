@@ -1,0 +1,8 @@
+# Strict: every rule in the recommended set is an error, not a warning.
+extends:
+  - recommended-strict
+rules:
+  no-invalid-media-type-examples:
+    severity: error
+    allowAdditionalProperties: false
+  operation-4xx-problem-details-rfc7807: error
